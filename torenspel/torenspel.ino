@@ -1,4 +1,10 @@
+#include <IRremote.h>
 // code based on https://projecthub.arduino.cc/SAnwandter1/programming-8x8-led-matrix-a3b852
+
+// pin setup
+const int RECV_PIN = 11;
+const int SPEAKER_PIN = 9;
+const int POWER_LED_PIN = 7; // LED power-indicator
 
 //update from SAnwandter
 
@@ -28,6 +34,13 @@ int grootte = 5;
 int row = 0;
 
 int i = 0;
+bool systemOn = true; // System state
+int volume = 5; // initiële volume level (assumed range 0-10)
+
+// IR Afstandsbediening codes
+const unsigned long POWER_BUTTON_CODE = 0xBD42FF00; // power on/off
+const unsigned long VOLUME_UP_BUTTON_CODE = 0xB946FF00; // volume up
+const unsigned long VOLUME_DOWN_BUTTON_CODE = 0xEA15FF00; // volume down
 
 byte display_row[8] = { B11111111, B11111111, B11111111, B11111111, B11111111, B11111111, B11111111, B11111111 };
 const byte rows[] = {
@@ -47,6 +60,9 @@ unsigned long debounceDelay = 50;
 void setup() {
   // Open serial port
   Serial.begin(9600);
+  
+  // Start IR receiver
+  IrReceiver.begin(RECV_PIN);
 
   // Set all used pins to OUTPUT
   // This is very important! If   the pins are set to input
@@ -57,43 +73,86 @@ void setup() {
     pinMode(col[i], OUTPUT);
 
   pinMode(S1, INPUT_PULLUP);
+  pinMode(SPEAKER_PIN, OUTPUT);
+  pinMode(POWER_LED_PIN, OUTPUT);
+  
   attachInterrupt(digitalPinToInterrupt(S1), buttonPressed, FALLING);  // trigger when button pressed, but not when released.
+
+  // Optional: Indicate system is on at startup
+  digitalWrite(POWER_LED_PIN, systemOn ? HIGH : LOW);
 }
 
 void loop() {
-  flag = false;
-  for (int i = 0; i < grootte + 8; i++) {
-    if (!flag) {
-      if (i < grootte) {
-        display_row[row] = display_row[row] << 1;
+  // IR afstandsbediening inputs
+  if (IrReceiver.decode()) {
+    unsigned long receivedCode = IrReceiver.decodedIRData.decodedRawData;
 
+    if (receivedCode == POWER_BUTTON_CODE) {
+      systemOn = !systemOn; // Toggle system state
+      Serial.println(systemOn ? "System ON" : "System OFF");
+
+      // Optional: Update power LED state
+      digitalWrite(POWER_LED_PIN, systemOn ? HIGH : LOW);
+
+      if (!systemOn) {
+        // toevoegen code system OFF (uitzetten van: LEDs, speaker, LED matrix)
+        powerDownSystem();
       } else {
-        byte x = B11111111;
-
-        display_row[row] = ((display_row[row] << 1) | (x >> (7 - (i - grootte))));
+        // toevoegen code system ON (aanzetten van: LEDs, speaker, LED matrix)
+        powerUpSystem();
       }
-      time = millis();
-      while (millis() - time < delayTime) {
-        drawScreen();
+    } else if (receivedCode == VOLUME_UP_BUTTON_CODE) {
+      if (systemOn && volume < 10) {
+        volume++;
+        Serial.print("Volume Up: ");
+        Serial.println(volume);
+        // Code om speaker volume te verhogen
+        analogWrite(SPEAKER_PIN, map(volume, 0, 10, 0, 255));
+      }
+    } else if (receivedCode == VOLUME_DOWN_BUTTON_CODE) {
+      if (systemOn && volume > 0) {
+        volume--;
+        Serial.print("Volume Down: ");
+        Serial.println(volume);
+        // Code om speaker volume te verlagen
+        analogWrite(SPEAKER_PIN, map(volume, 0, 10, 0, 255));
       }
     }
+
+    IrReceiver.resume(); // Receive next value
   }
 
-  for (int i = grootte + 8; i > 0; i--) {
-    if (!flag) {
-      if (i > 8) {
-        display_row[row] = display_row[row] >> 1;
-
-      } else {
-        byte x = B11111111;
-
-        display_row[row] = ((display_row[row] >> 1) | (x << (i - 1)));
+  // Ga door met de bestaande functionaliteit als het systeem is ingeschakeld
+  if (systemOn) {
+    flag = false;
+    for (int i = 0; i < grootte + 8; i++) {
+      if (!flag) {
+        if (i < grootte) {
+          display_row[row] = display_row[row] << 1;
+        } else {
+          byte x = B11111111;
+          display_row[row] = ((display_row[row] << 1) | (x >> (7 - (i - grootte))));
+        }
+        time = millis();
+        while (millis() - time < delayTime) {
+          drawScreen();
+        }
       }
-      Serial.println(flag); //niet verwijderen, ik heb geen idee waarom, maar zonder dit werkt het niet lol
-      time = millis();
-      while (millis() - time < delayTime) {
-        drawScreen();
+    }
 
+    for (int i = grootte + 8; i > 0; i--) {
+      if (!flag) {
+        if (i > 8) {
+          display_row[row] = display_row[row] >> 1;
+        } else {
+          byte x = B11111111;
+          display_row[row] = ((display_row[row] >> 1) | (x << (i - 1)));
+        }
+        Serial.println(flag); //niet verwijderen, ik heb geen idee waarom, maar zonder dit werkt het niet lol
+        time = millis();
+        while (millis() - time < delayTime) {
+          drawScreen();
+        }
       }
     }
   }
@@ -138,5 +197,44 @@ void buttonPressed() {
       }
     }
   }
-  
+}
+
+// Functie om het systeem uit te zetten (Uitzetten van alle pins, behalve de IR receiver pin)
+void powerDownSystem() {
+  // Turn off speaker
+  noTone(SPEAKER_PIN);
+
+  // Uitzetten alle digital pins, behalve RECV_PIN
+  for (int pin = 2; pin <= 13; pin++) {
+    if (pin != RECV_PIN) {
+      pinMode(pin, INPUT);
+    }
+  }
+
+  // Uitzetten alle analog pins
+  for (int pin = A0; pin <= A5; pin++) {
+    pinMode(pin, INPUT);
+  }
+
+  Serial.println("System is powered down.");
+}
+
+// Functie om systeem aan te zetten
+void powerUpSystem() {
+  // Aanzetten speaker (if needed, you can initialize it to a default state)
+  analogWrite(SPEAKER_PIN, map(volume, 0, 10, 0, 255));
+
+  // Aanzetten alle digital pins, behalve RECV_PIN
+  for (int pin = 2; pin <= 13; pin++) {
+    if (pin != RECV_PIN) {
+      pinMode(pin, OUTPUT);
+    }
+  }
+
+  // Aanzetten alle analog pins
+  for (int pin = A0; pin <= A5; pin++) {
+    pinMode(pin, OUTPUT);
+  }
+
+  Serial.println("System is powered up.");
 }
